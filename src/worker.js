@@ -11,7 +11,7 @@ function json(data, status = 200) {
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'access-control-allow-origin': '*',
-      'access-control-allow-methods': 'GET,POST,OPTIONS',
+      'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS',
       'access-control-allow-headers': 'content-type',
     },
   });
@@ -454,10 +454,16 @@ async function handleGenerate(request, env, url) {
 
   const nodes = buildNodes(baseNodes, preferredEndpoints, options);
 
+  const now = new Date().toISOString();
   const payload = {
-    version: 1,
-    createdAt: new Date().toISOString(),
+    version: 2,
+    createdAt: now,
+    updatedAt: now,
     options,
+    inputs: {
+      nodeLinks: String(body.nodeLinks || ''),
+      preferredIps: String(body.preferredIps || ''),
+    },
     nodes,
   };
 
@@ -468,15 +474,13 @@ async function handleGenerate(request, env, url) {
 
   if (!id) {
     id = await createUniqueShortId(env);
-    const ttl = 60 * 60 * 24 * 7; // 7天
 
+    // 订阅与去重键均永久保存（历史记录需求：链接永不过期，由删除操作显式清理）
     await env.SUB_STORE.put(`sub:${id}`, JSON.stringify(payload), {
-      expirationTtl: ttl,
+      metadata: buildSubMetadata(payload),
     });
 
-    await env.SUB_STORE.put(dedupKey, id, {
-      expirationTtl: ttl,
-    });
+    await env.SUB_STORE.put(dedupKey, id);
   }
 
   const origin = url.origin;
@@ -493,6 +497,7 @@ async function handleGenerate(request, env, url) {
     storage: 'kv',
     deduplicated: true,
     shortId: id,
+    createdAt: payload.createdAt,
     urls: {
       auto: withToken(''),
       raw: withToken('raw'),
@@ -553,6 +558,177 @@ async function handleSub(url, env) {
   return text(renderRaw(nodes), 200, 'text/plain; charset=utf-8');
 }
 
+function countProtocols(nodes) {
+  const counts = {};
+  for (const node of nodes) {
+    const type = String(node?.type || 'unknown');
+    counts[type] = (counts[type] || 0) + 1;
+  }
+  return counts;
+}
+
+function buildSubMetadata(record) {
+  return {
+    createdAt: record.createdAt || '',
+    updatedAt: record.updatedAt || record.createdAt || '',
+    protocols: countProtocols(record.nodes || []),
+    outputNodes: Array.isArray(record.nodes) ? record.nodes.length : 0,
+    namePrefix: String(record.options?.namePrefix || ''),
+    hasInputs: Boolean(record.inputs),
+  };
+}
+
+async function loadSubRecord(env, id) {
+  const raw = await env.SUB_STORE.get(`sub:${id}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+// 计算某条订阅当前 inputs 对应的去重哈希（删除/编辑时用于清理旧键）
+async function buildRecordDedupHash(record) {
+  return buildDedupHash({
+    nodeLinks: record.inputs?.nodeLinks || '',
+    preferredIps: record.inputs?.preferredIps || '',
+    namePrefix: record.options?.namePrefix || '',
+    keepOriginalHost: record.options?.keepOriginalHost !== false,
+  });
+}
+
+async function handleHistory(url, env) {
+  const items = [];
+  let cursor;
+  do {
+    const list = await env.SUB_STORE.list({ prefix: 'sub:', cursor });
+    for (const key of list.keys) {
+      const id = key.name.slice('sub:'.length);
+      let meta = key.metadata || null;
+      if (!meta) {
+        // 旧格式记录（无 metadata）：get 一次兜底补全
+        const record = await loadSubRecord(env, id);
+        if (!record) continue;
+        meta = buildSubMetadata(record);
+      }
+      items.push({ id, ...meta });
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+
+  items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return json({ ok: true, items });
+}
+
+async function handleSubInput(url, env) {
+  const tokenCheck = validateAccessToken(url, env);
+  if (!tokenCheck.ok) return tokenCheck.response;
+
+  const id = url.pathname.split('/')[3];
+  const record = await loadSubRecord(env, id);
+  if (!record) return json({ ok: false, error: '订阅不存在或已删除' }, 404);
+
+  if (!record.inputs) {
+    return json({ ok: false, error: '该订阅为旧格式记录，不支持编辑，请重新生成一份。' }, 400);
+  }
+
+  return json({
+    ok: true,
+    inputs: record.inputs,
+    options: record.options || { namePrefix: '', keepOriginalHost: true },
+  });
+}
+
+async function handleSubUpdate(request, url, env) {
+  const tokenCheck = validateAccessToken(url, env);
+  if (!tokenCheck.ok) return tokenCheck.response;
+
+  const id = url.pathname.split('/')[3];
+  const record = await loadSubRecord(env, id);
+  if (!record) return json({ ok: false, error: '订阅不存在或已删除' }, 404);
+
+  if (!record.inputs) {
+    return json({ ok: false, error: '该订阅为旧格式记录，不支持编辑，请重新生成一份。' }, 400);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: '请求体不是合法 JSON' }, 400);
+  }
+
+  const baseNodes = parseRawLinks(body.nodeLinks || '');
+  const preferredEndpoints = parsePreferredEndpoints(body.preferredIps || '');
+  if (!baseNodes.length) return json({ ok: false, error: '没有识别到可用节点' }, 400);
+  if (!preferredEndpoints.length) return json({ ok: false, error: '没有识别到可用优选地址' }, 400);
+
+  const options = {
+    namePrefix: body.namePrefix || '',
+    keepOriginalHost: body.keepOriginalHost !== false,
+  };
+  const nodes = buildNodes(baseNodes, preferredEndpoints, options);
+
+  const oldHash = await buildRecordDedupHash(record);
+  const newHash = await buildDedupHash({
+    nodeLinks: String(body.nodeLinks || ''),
+    preferredIps: String(body.preferredIps || ''),
+    namePrefix: options.namePrefix,
+    keepOriginalHost: options.keepOriginalHost,
+  });
+
+  record.version = 2;
+  record.options = options;
+  record.inputs = {
+    nodeLinks: String(body.nodeLinks || ''),
+    preferredIps: String(body.preferredIps || ''),
+  };
+  record.updatedAt = new Date().toISOString();
+  record.nodes = nodes;
+
+  const writes = [
+    env.SUB_STORE.put(`sub:${id}`, JSON.stringify(record), {
+      metadata: buildSubMetadata(record),
+    }),
+    env.SUB_STORE.put(`dedup:${newHash}`, id),
+  ];
+  if (newHash !== oldHash) {
+    writes.push(env.SUB_STORE.delete(`dedup:${oldHash}`));
+  }
+  await Promise.all(writes);
+
+  return json({
+    ok: true,
+    updatedAt: record.updatedAt,
+    counts: {
+      inputNodes: baseNodes.length,
+      preferredEndpoints: preferredEndpoints.length,
+      outputNodes: nodes.length,
+    },
+    protocols: countProtocols(nodes),
+  });
+}
+
+async function handleSubDelete(url, env) {
+  const tokenCheck = validateAccessToken(url, env);
+  if (!tokenCheck.ok) return tokenCheck.response;
+
+  const id = url.pathname.split('/')[3];
+  const record = await loadSubRecord(env, id);
+  if (!record) return json({ ok: false, error: '订阅不存在或已删除' }, 404);
+
+  const ops = [env.SUB_STORE.delete(`sub:${id}`)];
+  if (record.inputs) {
+    // 新格式记录：连去重键一起删，避免相同输入重新生成时拿到死链
+    ops.push(env.SUB_STORE.delete(`dedup:${await buildRecordDedupHash(record)}`));
+  }
+  // 旧格式记录无 inputs、无法反推去重键：仅删订阅键，旧去重键 7 天内自然过期
+  await Promise.all(ops);
+
+  return json({ ok: true });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -561,18 +737,45 @@ export default {
       return new Response(null, {
         headers: {
           'access-control-allow-origin': '*',
-          'access-control-allow-methods': 'GET,POST,OPTIONS',
+          'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS',
           'access-control-allow-headers': 'content-type',
         },
       });
+    }
+
+    // API 与订阅路径依赖 KV 绑定：缺失时给明确 JSON 错误，而不是 TypeError 500
+    if ((url.pathname.startsWith('/api/') || url.pathname.startsWith('/sub/')) && !env.SUB_STORE) {
+      return json({ ok: false, error: '服务端未绑定 KV（SUB_STORE），请先在 Worker 设置中添加 KV 绑定' }, 500);
     }
 
     if (request.method === 'POST' && url.pathname === '/api/generate') {
       return handleGenerate(request, env, url);
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/history') {
+      return handleHistory(url, env);
+    }
+
+    if (request.method === 'GET' && /^\/api\/sub\/[^/]+\/input$/.test(url.pathname)) {
+      return handleSubInput(url, env);
+    }
+
+    if (/^\/api\/sub\/[^/]+$/.test(url.pathname) && request.method === 'PUT') {
+      return handleSubUpdate(request, url, env);
+    }
+
+    if (/^\/api\/sub\/[^/]+$/.test(url.pathname) && request.method === 'DELETE') {
+      return handleSubDelete(url, env);
+    }
+
     if (request.method === 'GET' && url.pathname.startsWith('/sub/')) {
       return handleSub(url, env);
+    }
+
+    // 未命中的 /api/* 一律 JSON 404：不能落到 ASSETS 的 SPA 兜底返回 index.html，
+    // 否则前端 response.json() 会报 "Unexpected token '<'" 这类解析错误
+    if (url.pathname.startsWith('/api/')) {
+      return json({ ok: false, error: 'Not Found' }, 404);
     }
 
     return env.ASSETS.fetch(request);

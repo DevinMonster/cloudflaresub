@@ -1,0 +1,6 @@
+# 纯本地私有知识库，不入 git
+.kb/
+.vscode/
+.wrangler/
+.hermes/
+node_modules/

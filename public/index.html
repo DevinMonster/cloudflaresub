@@ -13,6 +13,27 @@
   </head>
   <body>
     <main class="container">
+      <section id="historySection" class="card stack-lg history-section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">历史记录</p>
+            <h2>已保存的订阅</h2>
+            <p class="section-desc">
+              订阅链接永久有效，不会过期。编辑订阅内容后链接地址不变，客户端刷新订阅即可同步最新节点。
+            </p>
+          </div>
+          <button id="refreshHistoryBtn" type="button" class="secondary small">刷新</button>
+        </div>
+
+        <div id="historyWarning" class="warning hidden"></div>
+
+        <div id="historyEmpty" class="empty-state">
+          还没有生成过订阅。在下方表单生成订阅后，会自动出现在这里。
+        </div>
+
+        <div id="historyList" class="history-list"></div>
+      </section>
+
       <section class="hero card">
         <div>
           <p class="eyebrow">InfiCheesy &amp; YouTube &amp; GitHub</p>
