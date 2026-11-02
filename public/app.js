@@ -57,7 +57,7 @@ form.addEventListener('submit', async (event) => {
       body: JSON.stringify(payload),
     });
 
-    const data = await response.json();
+    const data = await readJson(response, '生成失败');
     if (!response.ok || !data.ok) {
       throw new Error(data.error || '生成失败');
     }
@@ -186,6 +186,7 @@ const historyList = document.getElementById('historyList');
 const historyEmpty = document.getElementById('historyEmpty');
 const historyWarning = document.getElementById('historyWarning');
 const refreshHistoryBtn = document.getElementById('refreshHistoryBtn');
+const setTokenBtn = document.getElementById('setTokenBtn');
 
 const HISTORY_TOKEN_KEY = 'subAccessToken';
 const FORMAT_LABELS = {
@@ -204,16 +205,66 @@ function getToken() {
   }
 }
 
+function setToken(token) {
+  try {
+    if (token) {
+      localStorage.setItem(HISTORY_TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(HISTORY_TOKEN_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+// 换机器 / 换浏览器 / 无痕窗口时 localStorage 是空的，页面就发不出令牌。
+// 用带 ?token=... 的链接打开本页即可自动落盘，之后所有 /api/sub/* 请求才带得上令牌。
+function bootstrapTokenFromUrl() {
+  let fromUrl = '';
+  try {
+    fromUrl = new URLSearchParams(location.search).get('token') || '';
+  } catch {
+    fromUrl = '';
+  }
+  if (fromUrl) setToken(fromUrl.trim());
+}
+
 function saveTokenFromUrls(urls) {
   if (!urls?.auto) return;
   try {
     const token = new URL(urls.auto).searchParams.get('token');
     if (token) {
-      localStorage.setItem(HISTORY_TOKEN_KEY, token);
+      setToken(token);
     }
   } catch {
     // ignore
   }
+}
+
+const TOKEN_HINT =
+  '访问令牌缺失或无效：请用带 ?token=你的令牌 的链接打开本页，或点「设置令牌」重新填写。';
+
+// 统一读取响应体：非 JSON（例如 403 纯文本 Forbidden、网关 HTML 错误页）也能给出人话提示，
+// 不再把 JSON.parse 的 "Unexpected token 'F'" 直接抛给用户。
+async function readJson(response, fallbackMessage) {
+  const raw = await response.text();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // 落到下面的错误分支
+    }
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(TOKEN_HINT);
+  }
+  const snippet = raw.trim().slice(0, 120);
+  throw new Error(
+    snippet
+      ? `${fallbackMessage}（HTTP ${response.status}：${snippet}）`
+      : `${fallbackMessage}（HTTP ${response.status}）`,
+  );
 }
 
 function tokenSuffix() {
@@ -258,7 +309,7 @@ function hideHistoryWarning() {
 async function loadHistory() {
   try {
     const response = await fetch('/api/history');
-    const data = await response.json();
+    const data = await readJson(response, '加载历史失败');
     if (!response.ok || !data.ok) {
       throw new Error(data.error || '加载历史失败');
     }
@@ -377,7 +428,7 @@ async function openEditor(id) {
   const editor = item.querySelector('.history-edit');
   try {
     const response = await fetch(`/api/sub/${encodeURIComponent(id)}/input${tokenSuffix()}`);
-    const data = await response.json();
+    const data = await readJson(response, '加载订阅内容失败');
     if (!response.ok || !data.ok) {
       throw new Error(data.error || '加载订阅内容失败');
     }
@@ -408,7 +459,7 @@ async function saveEditor(id) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
+    const data = await readJson(response, '保存失败');
     if (!response.ok || !data.ok) {
       throw new Error(data.error || '保存失败');
     }
@@ -426,7 +477,7 @@ async function deleteItem(id) {
     const response = await fetch(`/api/sub/${encodeURIComponent(id)}${tokenSuffix()}`, {
       method: 'DELETE',
     });
-    const data = await response.json();
+    const data = await readJson(response, '删除失败');
     if (!response.ok || !data.ok) {
       throw new Error(data.error || '删除失败');
     }
@@ -471,4 +522,15 @@ document.addEventListener('change', (event) => {
 
 refreshHistoryBtn.addEventListener('click', loadHistory);
 
+setTokenBtn.addEventListener('click', () => {
+  const input = window.prompt(
+    '粘贴 Worker 里配置的 SUB_ACCESS_TOKEN（留空表示清除本机已保存的令牌）',
+    getToken(),
+  );
+  if (input === null) return;
+  setToken(input.trim());
+  loadHistory();
+});
+
+bootstrapTokenFromUrl();
 loadHistory();

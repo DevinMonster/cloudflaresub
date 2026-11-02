@@ -521,12 +521,17 @@ async function handleGenerate(request, env, url) {
   });
 }
 
-function validateAccessToken(url, env) {
+const TOKEN_ERROR = '访问令牌缺失或无效：请用带 ?token=你的令牌 的链接打开本页，或在页面点「设置令牌」重新填写。';
+
+function validateAccessToken(url, env, asApi = false) {
   const expected = env.SUB_ACCESS_TOKEN;
   if (!expected) return { ok: true };
   const provided = url.searchParams.get('token') || '';
   if (!provided || provided !== expected) {
-    return { ok: false, response: text('Forbidden: invalid token', 403) };
+    return {
+      ok: false,
+      response: asApi ? json({ ok: false, error: TOKEN_ERROR }, 403) : text('Forbidden: invalid token', 403),
+    };
   }
   return { ok: true };
 }
@@ -622,7 +627,7 @@ async function handleHistory(url, env) {
 }
 
 async function handleSubInput(url, env) {
-  const tokenCheck = validateAccessToken(url, env);
+  const tokenCheck = validateAccessToken(url, env, true);
   if (!tokenCheck.ok) return tokenCheck.response;
 
   const id = url.pathname.split('/')[3];
@@ -641,7 +646,7 @@ async function handleSubInput(url, env) {
 }
 
 async function handleSubUpdate(request, url, env) {
-  const tokenCheck = validateAccessToken(url, env);
+  const tokenCheck = validateAccessToken(url, env, true);
   if (!tokenCheck.ok) return tokenCheck.response;
 
   const id = url.pathname.split('/')[3];
@@ -711,7 +716,7 @@ async function handleSubUpdate(request, url, env) {
 }
 
 async function handleSubDelete(url, env) {
-  const tokenCheck = validateAccessToken(url, env);
+  const tokenCheck = validateAccessToken(url, env, true);
   if (!tokenCheck.ok) return tokenCheck.response;
 
   const id = url.pathname.split('/')[3];

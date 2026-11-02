@@ -236,6 +236,12 @@ button.small {
   align-items: end;
 }
 
+.section-head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .counts {
   display: flex;
   flex-wrap: wrap;

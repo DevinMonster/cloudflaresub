@@ -54,4 +54,69 @@ async function get(pathname, env) {
   assert.equal(body.ok, false);
 }
 
+// 5) 访问令牌校验：/api/* 的 403 必须是 JSON，否则前端 response.json() 会报
+//    "Unexpected token 'F', \"Forbidden: \"... is not valid JSON"（线上真实 bug）
+const RECORD = {
+  version: 2,
+  createdAt: '2026-11-02T07:00:00.000Z',
+  inputs: { nodeLinks: 'vmess://abc', preferredIps: '104.16.1.2' },
+  options: { namePrefix: '', keepOriginalHost: true },
+  nodes: [],
+};
+const envWithToken = {
+  ASSETS: envWithAssets.ASSETS,
+  SUB_ACCESS_TOKEN: 'secret-token',
+  SUB_STORE: {
+    get: async (key) => (key === 'sub:abc123' ? JSON.stringify(RECORD) : null),
+    list: async () => ({ keys: [], list_complete: true }),
+  },
+};
+
+{
+  const res = await get('/api/sub/abc123/input', envWithToken);
+  const contentType = res.headers.get('content-type') || '';
+  assert.equal(res.status, 403, `缺令牌应 403，实际 ${res.status}`);
+  assert.ok(contentType.includes('json'), `/api/* 的 403 必须是 JSON，实际 ${contentType}`);
+  const body = await res.json(); // 若返回纯文本这里直接抛 "Unexpected token 'F'"
+  assert.equal(body.ok, false);
+  assert.match(body.error, /令牌/, '错误说明应提到令牌');
+}
+
+// 6) 令牌错了同样是 JSON 403（换机器后 localStorage 里是旧令牌的情况）
+{
+  const res = await get('/api/sub/abc123/input?token=stale', envWithToken);
+  assert.equal(res.status, 403);
+  assert.ok((res.headers.get('content-type') || '').includes('json'));
+  const body = await res.json();
+  assert.equal(body.ok, false);
+}
+
+// 7) 令牌正确时编辑回读正常返回 inputs
+{
+  const res = await get('/api/sub/abc123/input?token=secret-token', envWithToken);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.inputs.nodeLinks, 'vmess://abc');
+}
+
+// 8) PUT /api/sub/:id 缺令牌也必须是 JSON 403，不能是纯文本
+{
+  const res = await worker.fetch(
+    new Request('https://worker.test/api/sub/abc123', { method: 'PUT', body: '{}' }),
+    envWithToken,
+  );
+  assert.equal(res.status, 403);
+  assert.ok((res.headers.get('content-type') || '').includes('json'));
+  const body = await res.json();
+  assert.equal(body.ok, false);
+}
+
+// 9) /sub/* 面向客户端，明文 403 的旧行为保持不变
+{
+  const res = await get('/sub/abc123', envWithToken);
+  assert.equal(res.status, 403);
+  assert.equal(await res.text(), 'Forbidden: invalid token');
+}
+
 console.log('worker-routing: all assertions passed');

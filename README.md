@@ -91,6 +91,8 @@ cloudflaresub/
 
 说明：
 - 设置后，请求 `/sub/:id` 必须带 `?token=...`
+- 编辑、删除历史订阅走 `/api/sub/:id`，同样校验令牌；前端会把令牌存进浏览器 localStorage
+- 换机器 / 换浏览器 / 无痕窗口时 localStorage 为空，请在面板点「设置令牌」粘贴一次，或用 `https://<worker>/?token=<SUB_ACCESS_TOKEN>` 打开面板（会自动保存）
 - 不设置也可运行，但订阅链接没有二次访问保护
 
 ### 7) 验证线上服务
